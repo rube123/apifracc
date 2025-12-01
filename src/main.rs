@@ -923,13 +923,21 @@ async fn emisor_puede_enviar(pool: &PgPool, id_usuario: i32) -> Result<bool, sql
 // =====================================
 
 async fn get_fcm_access_token() -> Result<String, Box<dyn std::error::Error>> {
+    // lee el service account de fcm_service_account.json
     let key = read_service_account_key("fcm_service_account.json").await?;
     let auth = ServiceAccountAuthenticator::builder(key).build().await?;
+
+    // pide token para el scope de FCM
     let access = auth
         .token(&["https://www.googleapis.com/auth/firebase.messaging"])
         .await?;
 
-    let token_str = access.token().ok_or("Token FCM vacío")?.to_string();
+    // AccessToken -> usamos .token(), no .as_str()
+    let token_str = access
+        .token()                        // Option<&str>
+        .ok_or("Token FCM vacío")?      // si viene None, error
+        .to_string();                   // &str -> String
+
     Ok(token_str)
 }
 
@@ -937,8 +945,14 @@ async fn get_fcm_access_token() -> Result<String, Box<dyn std::error::Error>> {
 // ENVIAR PUSH FCM
 // =====================================
 
-async fn send_fcm_push(pool: &PgPool, titulo: &str, mensaje: &str, destinatarios: &Vec<i32>) -> Result<(), Box<dyn std::error::Error>> {
+async fn send_fcm_push(
+    pool: &PgPool,
+    titulo: &str,
+    mensaje: &str,
+    destinatarios: &Vec<i32>,
+) -> Result<(), Box<dyn std::error::Error>> {
     if destinatarios.is_empty() {
+        println!("ℹ️ send_fcm_push: sin destinatarios -> no envío nada");
         return Ok(());
     }
 
@@ -946,7 +960,7 @@ async fn send_fcm_push(pool: &PgPool, titulo: &str, mensaje: &str, destinatarios
         r#"
         SELECT push_token
         FROM dispositivo
-        WHERE activo=TRUE AND id_persona = ANY($1)
+        WHERE activo = TRUE AND id_persona = ANY($1)
         "#,
     )
     .bind(destinatarios)
@@ -954,13 +968,19 @@ async fn send_fcm_push(pool: &PgPool, titulo: &str, mensaje: &str, destinatarios
     .await?;
 
     let tokens: Vec<String> = tokens_rows.into_iter().map(|r| r.push_token).collect();
+
     if tokens.is_empty() {
+        println!("ℹ️ send_fcm_push: no hay tokens activos para {:?}", destinatarios);
         return Ok(());
     }
 
     let bearer = get_fcm_access_token().await?;
-    let project_id = env::var("FCM_PROJECT_ID")?;
-    let url = format!("https://fcm.googleapis.com/v1/projects/{}/messages:send", project_id);
+    let project_id = env::var("FCM_PROJECT_ID")?; // ej. fraccionamiento-app
+    let url = format!(
+        "https://fcm.googleapis.com/v1/projects/{}/messages:send",
+        project_id
+    );
+
     let client = HttpClient::new();
 
     for t in tokens {
@@ -972,14 +992,27 @@ async fn send_fcm_push(pool: &PgPool, titulo: &str, mensaje: &str, destinatarios
               "priority": "HIGH",
               "notification": { "channel_id": "avisos", "sound": "default" }
             },
-            "data": { "tipo": "aviso", "click_action": "FLUTTER_NOTIFICATION_CLICK" }
+            "data": {
+              "tipo": "aviso",
+              "click_action": "FLUTTER_NOTIFICATION_CLICK"
+            }
           }
         });
 
-        let res = client.post(&url).bearer_auth(&bearer).json(&body).send().await?;
+        let res = client
+            .post(&url)
+            .bearer_auth(&bearer)
+            .json(&body)
+            .send()
+            .await?;
 
-        if !res.status().is_success() {
-            println!("❌ FCM error: {}", res.text().await.unwrap_or_default());
+        let status = res.status();
+        let txt = res.text().await.unwrap_or_default();
+
+        if status.is_success() {
+            println!("✅ FCM enviado OK -> {status} {txt}");
+        } else {
+            println!("❌ FCM error -> {status} {txt}");
         }
     }
 
