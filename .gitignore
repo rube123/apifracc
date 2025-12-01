@@ -1,1 +1,5 @@
 /target
+.env
+fcm_service_account.json
+.env
+fcm_service_account.json
